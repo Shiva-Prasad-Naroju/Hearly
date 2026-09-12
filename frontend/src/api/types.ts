@@ -66,7 +66,13 @@ export interface PendingAction {
   confidence: number;
   reason: string;
   args: PendingActionArgs;
-  result: { eml_text: string; recipient_resolved: boolean } | null;
+  result: {
+    sent?: boolean;
+    to?: string;
+    from?: string;
+    eml_text?: string;
+    recipient_resolved?: boolean;
+  } | null;
 }
 
 export interface SessionReport {

@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     extraction_min_new_words: int = 18
     extraction_min_new_turns: int = 3
 
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_use_tls: bool = True
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

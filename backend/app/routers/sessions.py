@@ -8,12 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db import get_db
-from app.models import Session, Participant, TranscriptSegment, Event
+from app.models import Session, Participant, TranscriptSegment, Event, PendingAction
 from app.schemas import (
     CreateSessionRequest, SessionOut, SessionDetailOut, StartSessionRequest,
     RenameParticipantRequest, ParticipantOut, AskRequest, AskResponse,
+    SendMailRequest, UpdateEventRequest, EventOut, PendingActionOut,
 )
-from app.services import llm_groq, state_engine
+from app.config import get_settings
+from app.services import llm_groq, state_engine, smtp_mail
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -120,6 +122,7 @@ async def stop_session(session_id: str, db: AsyncSession = Depends(get_db)):
         s.last_processed_index = unprocessed[-1].sequence
         db.add(s)
         await db.commit()
+        await db.refresh(s)
 
     events_result = await db.execute(select(Event).where(Event.session_id == session_id))
     events = events_result.scalars().all()
@@ -160,6 +163,16 @@ async def stop_session(session_id: str, db: AsyncSession = Depends(get_db)):
     db.add(s)
     await db.commit()
     await db.refresh(s)
+
+    # Understand first (report above). Draft only if someone actually promised a mail.
+    if transcript_text.strip() and state_engine.has_explicit_mail_promise(transcript_text):
+        summary = (s.report or {}).get("summary") or fallback_summary
+        composed = await llm_groq.compose_promised_mails(
+            summary, events_text, participants_text, transcript_text
+        )
+        await state_engine.seed_composed_mails(db, s, composed, summary, transcript_text)
+        await db.refresh(s)
+
     return _session_out(s)
 
 
@@ -202,3 +215,52 @@ async def ask_question(session_id: str, req: AskRequest, db: AsyncSession = Depe
         req.question, s.running_summary or "(no summary yet)", events_text, transcript_text
     )
     return answer
+
+
+@router.patch("/{session_id}/events/{event_id}", response_model=EventOut)
+async def update_event(
+    session_id: str, event_id: str, body: UpdateEventRequest, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(Event).where(Event.id == event_id, Event.session_id == session_id)
+    )
+    ev = result.scalar_one_or_none()
+    if ev is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    ev.status = body.status
+    db.add(ev)
+    await db.commit()
+    await db.refresh(ev)
+    return EventOut.model_validate(ev)
+
+
+@router.post("/{session_id}/mail", response_model=PendingActionOut)
+async def send_session_mail(session_id: str, body: SendMailRequest, db: AsyncSession = Depends(get_db)):
+    await _get_session_or_404(db, session_id)
+    if not smtp_mail.is_email(body.to):
+        raise HTTPException(status_code=400, detail="Enter a real email address in To.")
+    try:
+        smtp_mail.send_mail(to=body.to, subject=body.subject, body=body.body, cc=body.cc)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    action = PendingAction(
+        session_id=session_id,
+        tool_name="draft_email",
+        status="executed",
+        confidence=1.0,
+        reason="Sent from the session mail tab",
+        args={
+            "to": body.to.strip(),
+            "cc": body.cc,
+            "subject": body.subject,
+            "body": body.body,
+            "recipient_resolved": True,
+        },
+        result={"sent": True, "to": body.to.strip(), "from": get_settings().smtp_from or get_settings().smtp_user},
+        decided_at=datetime.utcnow(),
+    )
+    db.add(action)
+    await db.commit()
+    await db.refresh(action)
+    return PendingActionOut.model_validate(action)

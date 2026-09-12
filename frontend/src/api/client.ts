@@ -4,6 +4,7 @@ import type {
   AudioChunkResponse,
   PendingAction,
   AskResponse,
+  ConvEvent,
 } from "./types";
 
 function resolveApiBase(): string {
@@ -95,16 +96,25 @@ export const api = {
   rejectAction: (actionId: string) =>
     request<PendingAction>(`/api/actions/${actionId}/reject`, { method: "POST" }),
 
+  sendSessionMail: (
+    sessionId: string,
+    payload: { to: string; cc?: string[]; subject: string; body: string },
+  ) =>
+    request<PendingAction>(`/api/sessions/${sessionId}/mail`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateEvent: (sessionId: string, eventId: string, status: "open" | "done" | "cancelled") =>
+    request<ConvEvent>(`/api/sessions/${sessionId}/events/${eventId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+
   ask: (sessionId: string, question: string) =>
     request<AskResponse>(`/api/sessions/${sessionId}/ask`, {
       method: "POST",
       body: JSON.stringify({ question }),
-    }),
-
-  tts: (text: string) =>
-    request<{ audio_base64: string; format: string }>("/api/tts", {
-      method: "POST",
-      body: JSON.stringify({ text }),
     }),
 };
 

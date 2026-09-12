@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.models import PendingAction
 from app.schemas import ApproveActionRequest, PendingActionOut
+from app.config import get_settings
+from app.services import smtp_mail
 
 router = APIRouter(prefix="/api/actions", tags=["actions"])
 
@@ -37,25 +39,40 @@ async def list_actions(session_id: str | None = None, status: str | None = None,
 async def approve_action(action_id: str, body: ApproveActionRequest, db: AsyncSession = Depends(get_db)):
     action = await _get_action_or_404(db, action_id)
 
-    # Idempotent: approving an already-decided action returns its existing result, never re-executes
     if action.status in ("approved", "executed"):
         return PendingActionOut.model_validate(action)
 
     if body.edited_args:
         action.args = {**action.args, **body.edited_args}
 
-    # MVP "execution" for draft_email is just producing a copyable/downloadable draft —
-    # we NEVER auto-send. A real send would require a connected provider + a resolved address.
+    args = action.args or {}
+    to = str(args.get("to") or "").strip()
+    if not smtp_mail.is_email(to):
+        raise HTTPException(status_code=400, detail="Enter the recipient's email address in To, then send.")
+
+    cc = args.get("cc") or []
+    if isinstance(cc, str):
+        cc = [c.strip() for c in cc.split(",") if c.strip()]
+
+    try:
+        smtp_mail.send_mail(
+            to=to,
+            subject=str(args.get("subject") or "Follow-up"),
+            body=str(args.get("body") or ""),
+            cc=list(cc),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
     action.status = "executed"
     action.decided_at = datetime.utcnow()
-    args = action.args
-    eml_text = (
-        f"To: {args.get('to', '')}\n"
-        f"Cc: {', '.join(args.get('cc', []) or [])}\n"
-        f"Subject: {args.get('subject', '')}\n\n"
-        f"{args.get('body', '')}\n"
-    )
-    action.result = {"eml_text": eml_text, "recipient_resolved": args.get("recipient_resolved", False)}
+    action.args = {**args, "to": to, "cc": cc, "recipient_resolved": True}
+    action.result = {
+        "sent": True,
+        "to": to,
+        "from": get_settings().smtp_from or get_settings().smtp_user,
+        "recipient_resolved": True,
+    }
     db.add(action)
     await db.commit()
     await db.refresh(action)

@@ -8,7 +8,7 @@ from groq import Groq
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.schemas import StatePatch, SessionReport, AskResponse
+from app.schemas import StatePatch, SessionReport, AskResponse, MailComposeResult
 
 logger = logging.getLogger("hearly.llm")
 
@@ -38,6 +38,11 @@ Critical distinctions (get these right, they are the whole job):
 - "He said he'd handle it" -> modality=quoted, owner is NOT the current speaker.
 - "I'm not going to send that" -> modality=negated.
 - "Should we deploy Friday?" -> type=question, modality=questioned. Not a decision.
+- "I will mail you on this" / "I'll send you an email" / "I'll email the update" -> type=email_request,
+  modality=stated. Do NOT dump the raw transcript into email_draft. Leave email_draft null here;
+  a later pass writes the polished mail from the full summary.
+- A passing mention of the word "mail" or "send this" without a person promising to email someone
+  is NOT an email_request.
 - Casual banter, backchannel ("yeah", "okay", "cool") -> emit nothing for it.
 - A name mentioned with no clear evidence of that person owning an action -> type=person_mention only,
   never bind it as an owner_name on another event.
@@ -51,8 +56,8 @@ Hard rules:
 3. Every event MUST include an evidence.quote that is copied VERBATIM (exact substring) from the window
    you were given. Do not paraphrase the quote. If you cannot quote it verbatim, do not emit the event.
 4. If the window has nothing notable, return "nothing_notable": true and empty "events".
-5. Only emit an "email_draft" on an event of type "email_request" or a commitment that explicitly is
-   about sending something, and only when the conversation gave you enough to draft it.
+5. Leave email_draft null during this pass. Only mark type=email_request when someone explicitly
+   promised or asked to send an email.
 6. Output confidence honestly: 0.9+ only for explicit, unambiguous statements.
 
 Respond with ONLY a single JSON object matching this exact shape (no markdown fences, no commentary):
@@ -92,8 +97,44 @@ no markdown fences:
   "participants": ["Speaker 1", "Rahul (Speaker 2)"]
 }
 Keep every line short and concrete. Do not invent anything not present in the transcript or events.
+If someone explicitly promised to send an email or mail, mention that in follow_ups with who and the topic.
 If the transcript has content, the summary MUST describe it — never say that no summary is available.
 """
+
+MAIL_AGENT_PROMPT = """You are Hearly's follow-up agent. You have already understood the conversation.
+
+Do this in order:
+1. Read the summary. Understand what was decided and who owns what.
+2. Draft a mail ONLY if someone made an explicit promise or request, such as
+   "I'll mail you", "I will send you an email", "please email the client",
+   "I'll send a mail on this task".
+3. If the only mention is STT noise or a vague phrase — "send this",
+   "submit and send this to the mail", "you need to send this to the mail" —
+   return {"mails": []}. Prefer no draft over a wrong draft.
+4. The email body is a polished follow-up written from the SUMMARY.
+   Never paste raw speech, never quote the transcript, never use STT fragments
+   as the subject, never invent task lists that were not in the summary.
+
+reason must be a sentence like:
+"{Name or Speaker N} said they would send a mail about {the topic}."
+
+to is a spoken name or empty. NEVER invent an email address.
+
+Respond with ONLY JSON:
+{
+  "mails": [
+    {
+      "speaker_label": "speaker_1",
+      "speaker_name": "Asha",
+      "reason": "Asha said they would send a mail about the Friday cutover.",
+      "to": "",
+      "subject": "Follow-up: Friday cutover",
+      "body": "Hi,\\n\\n...\\n\\nThanks"
+    }
+  ]
+}
+"""
+
 
 QA_SYSTEM_PROMPT = """You answer a user's question about their own conversation, using ONLY the transcript, \
 running summary and events provided. If the answer isn't in the given context, say you don't have enough \
@@ -168,6 +209,27 @@ async def finalize_session(
     except Exception as e:
         logger.error("finalize failed: %s", e)
         return None
+
+
+async def compose_promised_mails(
+    summary: str,
+    events_text: str,
+    participants_text: str,
+    transcript_text: str = "",
+) -> MailComposeResult:
+    user_prompt = (
+        f"CONVERSATION SUMMARY:\n{summary or '(no summary yet)'}\n\n"
+        f"PARTICIPANTS:\n{participants_text}\n\n"
+        f"EXTRACTED EVENTS:\n{events_text}\n\n"
+        f"TRANSCRIPT (for understanding only — do not copy it into the email):\n"
+        f"{transcript_text or '(no transcript)'}"
+    )
+    try:
+        raw = await _chat_json(MAIL_AGENT_PROMPT, user_prompt)
+        return MailComposeResult.model_validate(raw)
+    except Exception as e:
+        logger.error("mail compose failed: %s", e)
+        return MailComposeResult()
 
 
 async def answer_question(

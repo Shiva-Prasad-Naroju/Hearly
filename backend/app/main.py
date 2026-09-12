@@ -45,4 +45,5 @@ async def healthz():
         "status": "ok",
         "groq_configured": bool(live.groq_api_key),
         "sarvam_configured": bool(live.sarvam_api_key),
+        "smtp_configured": bool(live.smtp_host and live.smtp_user and live.smtp_password),
     }

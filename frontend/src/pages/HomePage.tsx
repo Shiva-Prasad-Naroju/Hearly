@@ -147,7 +147,7 @@ export function HomePage({ onStartListening, onOpenSession, starting }: HomePage
               <div>
                 <div className="flow-index">1</div>
                 <h3>The room is listened to</h3>
-                <p>Press start and speak naturally. No speaker chips, no live transcript — just a listening pulse.</p>
+                <p>Press start and speak naturally. Words stream on screen as they are said.</p>
               </div>
             </article>
             <article className="flow-stage">
@@ -193,7 +193,7 @@ export function HomePage({ onStartListening, onOpenSession, starting }: HomePage
             <div className="capability-copy">
               <h3>Named conversation after you stop</h3>
               <p>
-                While the room is live, Hearly stays out of the way. After you stop, you
+                While the room is live, words stream as they are spoken. After you stop, you
                 get the speakers and their turns — tap a name to rename it.
               </p>
             </div>
@@ -260,8 +260,8 @@ export function HomePage({ onStartListening, onOpenSession, starting }: HomePage
           <p className="landing-kicker">In the product</p>
           <h2 className="landing-h2">One screen for the room, one for the record.</h2>
           <p className="landing-lead">
-            While you listen, the screen stays quiet. When you stop, the conversation
-            and the session record sit side by side so you can reopen them later.
+            While you listen, words stream as they are said. When you stop, the
+            conversation and the session record sit side by side so you can reopen them later.
           </p>
           <ProductFrame />
         </div>

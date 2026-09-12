@@ -96,6 +96,17 @@ class ApproveActionRequest(BaseModel):
     edited_args: dict | None = None
 
 
+class SendMailRequest(BaseModel):
+    to: str
+    cc: list[str] = Field(default_factory=list)
+    subject: str
+    body: str
+
+
+class UpdateEventRequest(BaseModel):
+    status: Literal["open", "done", "cancelled"]
+
+
 class AskRequest(BaseModel):
     question: str
 
@@ -167,6 +178,19 @@ class SessionReport(BaseModel):
     follow_ups: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
     participants: list[str] = Field(default_factory=list)
+
+
+class ComposedMail(BaseModel):
+    speaker_label: str | None = None
+    speaker_name: str | None = None
+    reason: str
+    to: str = ""
+    subject: str
+    body: str
+
+
+class MailComposeResult(BaseModel):
+    mails: list[ComposedMail] = Field(default_factory=list)
 
 
 class SessionDetailOut(SessionOut):

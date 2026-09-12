@@ -3,6 +3,10 @@ import type { PendingAction } from "../api/types";
 import { api } from "../api/client";
 import { useSessionStore } from "../store/sessionStore";
 
+function looksLikeEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
 function SingleApproval({ action }: { action: PendingAction }) {
   const updatePendingAction = useSessionStore((s) => s.updatePendingAction);
   const [to, setTo] = useState(action.args.to);
@@ -10,10 +14,11 @@ function SingleApproval({ action }: { action: PendingAction }) {
   const [cc, setCc] = useState((action.args.cc ?? []).join(", "));
   const [body, setBody] = useState(action.args.body);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const approve = async () => {
+  const send = async () => {
     setBusy(true);
+    setError(null);
     try {
       const updated = await api.approveAction(action.id, {
         to,
@@ -22,6 +27,8 @@ function SingleApproval({ action }: { action: PendingAction }) {
         body,
       });
       updatePendingAction(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't send the email.");
     } finally {
       setBusy(false);
     }
@@ -37,34 +44,27 @@ function SingleApproval({ action }: { action: PendingAction }) {
     }
   };
 
-  const copyDraft = async () => {
-    if (!action.result) return;
-    await navigator.clipboard.writeText(action.result.eml_text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
-  };
-
   if (action.status === "rejected") {
     return (
       <div className="panel card-pad">
-        <span className="muted t-support">Dismissed a draft email to {action.args.to}.</span>
+        <span className="muted t-support">Dismissed a draft email to {action.args.to || "an unnamed recipient"}.</span>
       </div>
     );
   }
 
   if (action.status === "executed" || action.status === "approved") {
+    const sentTo = action.result?.to || action.args.to;
     return (
       <div className="approval-card is-done">
         <div className="row-between">
-          <strong className="t-card">Draft ready to copy</strong>
-          <span className="pill pill-green">Approved</span>
+          <strong className="t-card">{action.result?.sent ? "Email sent" : "Draft approved"}</strong>
+          <span className="pill pill-green">{action.result?.sent ? "Sent" : "Approved"}</span>
         </div>
         <p className="t-meta" style={{ marginTop: 8 }}>
-          Send it from your own mail client. Hearly never sends email.
+          {action.result?.sent
+            ? `Sent to ${sentTo} from your Gmail.`
+            : "The draft is ready."}
         </p>
-        <button className="btn btn-secondary btn-sm" onClick={copyDraft} style={{ marginTop: 12 }}>
-          {copied ? "Copied" : "Copy draft"}
-        </button>
       </div>
     );
   }
@@ -72,19 +72,33 @@ function SingleApproval({ action }: { action: PendingAction }) {
   return (
     <div className="approval-card">
       <div className="row-between" style={{ marginBottom: 12 }}>
-        <strong className="t-card">Email draft to review</strong>
+        <strong className="t-card">Follow-up to send</strong>
         <span className="pill pill-blue">{Math.round(action.confidence * 100)}%</span>
       </div>
+      {action.reason && (
+        <p className="t-meta" style={{ margin: "0 0 12px" }}>
+          {action.reason}
+        </p>
+      )}
+      <p className="t-meta" style={{ margin: "0 0 12px" }}>
+        Add the recipient address, then send from your Gmail.
+      </p>
 
-      {!action.args.recipient_resolved && (
+      {!looksLikeEmail(to) && (
         <div className="pill pill-amber" style={{ marginBottom: 12 }}>
-          Recipient is not a confirmed address
+          Recipient still needs a real email address
         </div>
       )}
 
       <div className="field-row">
         <label className="field-label" htmlFor={`to-${action.id}`}>To</label>
-        <input id={`to-${action.id}`} className="draft-input" value={to} onChange={(e) => setTo(e.target.value)} />
+        <input
+          id={`to-${action.id}`}
+          className="draft-input"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          placeholder="name@company.com"
+        />
       </div>
       <div className="field-row">
         <label className="field-label" htmlFor={`cc-${action.id}`}>Cc</label>
@@ -96,17 +110,19 @@ function SingleApproval({ action }: { action: PendingAction }) {
       </div>
       <textarea className="draft-body" value={body} onChange={(e) => setBody(e.target.value)} aria-label="Email body" />
 
-      <p className="t-meta" style={{ marginTop: 10, marginBottom: 4 }}>
-        Because: {action.reason}
-      </p>
+      {error && (
+        <p className="t-meta" style={{ color: "var(--risk)", marginTop: 8 }}>
+          {error}
+        </p>
+      )}
 
       <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}>
         <button className="btn btn-ghost btn-sm" onClick={reject} disabled={busy}>
           Dismiss
         </button>
-        <button className="btn btn-primary btn-sm" onClick={approve} disabled={busy}>
+        <button className="btn btn-primary btn-sm" onClick={send} disabled={busy}>
           {busy && <span className="spinner" />}
-          Approve draft
+          Send from Gmail
         </button>
       </div>
     </div>

@@ -8,15 +8,27 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Session, Participant, Event, Alert, PendingAction
-from app.schemas import StatePatch, ExtractedEvent
+from app.schemas import StatePatch, ExtractedEvent, MailComposeResult
 
 logger = logging.getLogger("hearly.state")
 
 CONFIDENCE_FLOOR = 0.55  # below this, the event is stored but never surfaced as an alert/action
-COMMITMENT_CONFIRM_FLOOR = 0.75  # below this, a "commitment"/"email_request" cannot spawn an action
 
-# Types that create an actionable email draft when the LLM provided one
-EMAIL_TRIGGER_TYPES = {"email_request", "commitment"}
+# Only these spoken shapes count as a mail promise. "send this to the mail" does not.
+MAIL_PROMISE = re.compile(
+    r"""(?ix)
+    (?:
+        \b(?:i|we|he|she|they)\b.{0,40}(?:'ll|will|am\s+going\s+to|are\s+going\s+to|gonna).{0,30}
+        (?:mail|e-?mail|send\b.{0,20}\b(?:mail|e-?mail))
+        |
+        \bplease\b.{0,24}\b(?:mail|e-?mail|send\b.{0,20}\b(?:mail|e-?mail))
+        |
+        \b(?:mail|e-?mail)\s+me\b
+        |
+        \bsend\s+(?:you|me|them|him|her|us)\s+(?:a|an|the)?\s*(?:mail|e-?mail)
+    )
+    """
+)
 
 ALERT_LEVEL_BY_TYPE = {
     "risk": "HIGH",
@@ -161,30 +173,7 @@ async def apply_patch(
             await db.flush()
             new_alerts.append(alert_row)
 
-        # 3. Action proposal (email draft) — only on confident, stated commitments/requests with a draft
-        if (
-            ev.type in EMAIL_TRIGGER_TYPES
-            and ev.email_draft is not None
-            and ev.modality == "stated"
-            and ev.confidence >= COMMITMENT_CONFIRM_FLOOR
-        ):
-            action_row = PendingAction(
-                session_id=session.id,
-                tool_name="draft_email",
-                status="pending",
-                confidence=ev.confidence,
-                reason=f'Detected during conversation: "{ev.evidence.quote}"',
-                args={
-                    "to": ev.email_draft.to,
-                    "cc": ev.email_draft.cc,
-                    "subject": ev.email_draft.subject,
-                    "body": ev.email_draft.body,
-                    "recipient_resolved": False,  # names never auto-resolve to addresses (§14.3)
-                },
-            )
-            db.add(action_row)
-            await db.flush()
-            new_actions.append(action_row)
+        # Mail drafts are composed after the session is summarized — never from a live window.
 
     # 4. Running summary
     if patch.summary_update:
@@ -193,3 +182,116 @@ async def apply_patch(
 
     await db.commit()
     return new_events, new_alerts, new_actions
+
+
+def has_explicit_mail_promise(transcript_text: str) -> bool:
+    """True only when someone actually promised or asked to send an email."""
+    return bool(MAIL_PROMISE.search(transcript_text or ""))
+
+
+def _pretty_speaker(label: str | None) -> str | None:
+    if not label:
+        return None
+    m = re.match(r"speaker[_\s-]?(\d+)$", label.strip(), re.I)
+    if m:
+        return f"Speaker {m.group(1)}"
+    return label.replace("_", " ").strip().title()
+
+
+def _looks_like_transcript_dump(text: str, transcript_text: str) -> bool:
+    """True if the draft copied spoken fragments instead of summarizing."""
+    blob = (text or "").strip()
+    if not blob:
+        return True
+    source = (transcript_text or "").strip()
+    if not source:
+        return False
+    for line in source.splitlines():
+        spoken = re.sub(r"^[^:]+:\s*", "", line).strip()
+        if len(spoken) >= 18 and spoken.lower() in blob.lower():
+            return True
+    return False
+
+
+def _summary_followup_body(summary: str, reason: str) -> str:
+    topic = (summary or "").strip() or "our conversation"
+    lines = ["Hi,", "", "Following up from our conversation.", ""]
+    if reason:
+        lines.append(reason)
+        lines.append("")
+    lines.append(topic)
+    lines.extend(["", "Thanks"])
+    return "\n".join(lines)
+
+
+def _sanitize_to(to: str, transcript_text: str) -> str:
+    value = (to or "").strip()
+    if not value:
+        return ""
+    if "@" in value and value.lower() not in (transcript_text or "").lower():
+        return ""
+    return value
+
+
+async def seed_composed_mails(
+    db: AsyncSession,
+    session: Session,
+    composed: MailComposeResult,
+    summary: str,
+    transcript_text: str = "",
+) -> list[PendingAction]:
+    """Persist polished follow-ups after the session report exists. Never paste raw speech."""
+    existing = (
+        await db.execute(
+            select(PendingAction).where(
+                PendingAction.session_id == session.id,
+                PendingAction.tool_name == "draft_email",
+                PendingAction.status == "pending",
+            )
+        )
+    ).scalars().all()
+    if existing:
+        return []
+
+    created: list[PendingAction] = []
+    seen_reasons: set[str] = set()
+
+    for mail in composed.mails:
+        subject = (mail.subject or "").strip()
+        body = (mail.body or "").strip()
+        reason = (mail.reason or "").strip()
+        if not subject or not body:
+            continue
+        if _looks_like_transcript_dump(f"{subject}\n{body}", transcript_text):
+            body = _summary_followup_body(summary, reason)
+            first = (summary.split(".")[0] if summary else "Follow-up").strip()
+            subject = first[:80] if first else "Follow-up from our conversation"
+        if not reason:
+            who = mail.speaker_name or _pretty_speaker(mail.speaker_label) or "Someone"
+            reason = f"{who} said they would send a mail about this conversation."
+        if reason.lower() in seen_reasons:
+            continue
+        seen_reasons.add(reason.lower())
+
+        action = PendingAction(
+            session_id=session.id,
+            tool_name="draft_email",
+            status="pending",
+            confidence=0.9,
+            reason=reason,
+            args={
+                "to": _sanitize_to(mail.to, transcript_text),
+                "cc": [],
+                "subject": subject,
+                "body": body,
+                "recipient_resolved": False,
+            },
+        )
+        db.add(action)
+        created.append(action)
+
+    if created:
+        await db.commit()
+        for action in created:
+            await db.refresh(action)
+    return created

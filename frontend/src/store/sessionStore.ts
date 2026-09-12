@@ -46,6 +46,8 @@ interface SessionState {
   tickElapsed: () => void;
   dismissToast: (toastId: string) => void;
   updatePendingAction: (action: PendingAction) => void;
+  addPendingAction: (action: PendingAction) => void;
+  updateEventLocal: (eventId: string, status: string) => void;
   renameParticipantLocal: (speakerLabel: string, name: string) => void;
   setReport: (r: SessionDetail["report"]) => void;
 }
@@ -137,6 +139,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   updatePendingAction: (action) =>
     set((state) => ({
       pendingActions: state.pendingActions.map((a) => (a.id === action.id ? action : a)),
+    })),
+
+  addPendingAction: (action) =>
+    set((state) => ({ pendingActions: [action, ...state.pendingActions] })),
+
+  updateEventLocal: (eventId, status) =>
+    set((state) => ({
+      events: state.events.map((ev) => (ev.id === eventId ? { ...ev, status } : ev)),
     })),
 
   renameParticipantLocal: (speakerLabel, name) =>

@@ -1,23 +1,18 @@
 import { useState } from "react";
 import { api } from "../api/client";
-
-function base64ToBlob(base64: string, mime: string): Blob {
-  const byteChars = atob(base64);
-  const byteNumbers = new Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
-  return new Blob([new Uint8Array(byteNumbers)], { type: mime });
-}
+import { useBrowserTts } from "../hooks/useBrowserTts";
 
 export function AskBar({ sessionId }: { sessionId: string }) {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<string | null>(null);
   const [citations, setCitations] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const tts = useBrowserTts();
 
   const ask = async () => {
     if (!question.trim()) return;
+    tts.stop();
     setLoading(true);
     setErrorMsg(null);
     try {
@@ -28,24 +23,6 @@ export function AskBar({ sessionId }: { sessionId: string }) {
       setErrorMsg("Couldn't get an answer right now.");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const speak = async () => {
-    if (!answer) return;
-    setSpeaking(true);
-    setErrorMsg(null);
-    try {
-      const res = await api.tts(answer);
-      const blob = base64ToBlob(res.audio_base64, "audio/wav");
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
-      await audio.play();
-    } catch {
-      setErrorMsg("Voice playback failed. Is SARVAM_API_KEY set?");
-    } finally {
-      setSpeaking(false);
     }
   };
 
@@ -77,14 +54,31 @@ export function AskBar({ sessionId }: { sessionId: string }) {
               ))}
             </ul>
           )}
-          <button className="btn btn-ghost btn-sm" onClick={speak} disabled={speaking} style={{ marginTop: 8, paddingLeft: 0 }}>
-            {speaking ? <span className="spinner spinner-dark" /> : "Play answer"}
-          </button>
+          <div className="ask-speak">
+            {tts.speaking ? (
+              <button className="btn btn-ghost btn-sm ask-speak-btn" onClick={tts.stop}>
+                <span className="ask-speak-wave" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                Stop speaking
+              </button>
+            ) : (
+              <button
+                className="btn btn-ghost btn-sm ask-speak-btn"
+                onClick={() => void tts.speak(answer)}
+                disabled={!tts.supported}
+              >
+                Hear the answer
+              </button>
+            )}
+          </div>
         </div>
       )}
-      {errorMsg && (
+      {(errorMsg || tts.error) && (
         <p className="t-meta" style={{ color: "var(--risk)", marginTop: 8 }}>
-          {errorMsg}
+          {errorMsg || tts.error}
         </p>
       )}
     </div>
